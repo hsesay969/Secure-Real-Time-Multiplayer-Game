@@ -1,10 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const bodyParser = require('body-parser');
-const expect = require('chai');
-const socket = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
+const socket = require('socket.io');
 
 const fccTestingRoutes = require('./routes/fcctesting.js');
 const runner = require('./test-runner.js');
@@ -12,102 +11,97 @@ const Collectible = require('./public/Collectible.mjs');
 
 const app = express();
 
-// Security middleware
-app.use(helmet.noSniff());  // Prevent MIME type sniffing
-app.use(helmet.xssFilter());  // Prevent XSS attacks
-app.use(helmet.noCache());  // Disable caching
+// 🔐 Apply security headers
+app.use(helmet()); // Enables all modern security features
+app.use(helmet.hidePoweredBy({ setTo: 'PHP 7.4.3' })); // Fake header for security
 
-// Set headers before other middleware
+// 🔐 Disable caching
 app.use((req, res, next) => {
-  res.setHeader('X-Powered-By', 'PHP 7.4.3');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
   next();
 });
 
+// Enable CORS for FCC testing and remote access
+app.use(cors({ origin: '*' }));
+
+// Serve static files
 app.use('/public', express.static(process.cwd() + '/public'));
 app.use('/assets', express.static(process.cwd() + '/assets'));
 
+// Body parser middleware
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-//For FCC testing purposes and enables user to connect from outside the hosting platform
-app.use(cors({origin: '*'})); 
-
-// Index page (static HTML)
+// Serve index page
 app.route('/')
-  .get(function (req, res) {
+  .get((req, res) => {
     res.sendFile(process.cwd() + '/views/index.html');
-  }); 
+  });
 
-//For FCC testing purposes
+// FCC testing routes
 fccTestingRoutes(app);
-    
-// 404 Not Found Middleware
-app.use(function(req, res, next) {
-  res.status(404)
-    .type('text')
-    .send('Not Found');
+
+// 404 middleware
+app.use((req, res) => {
+  res.status(404).type('text').send('Not Found');
 });
 
+// Start the server
 const portNum = process.env.PORT || 3000;
-
-// Set up server and tests
 const server = app.listen(portNum, () => {
   console.log(`Listening on port ${portNum}`);
-  if (process.env.NODE_ENV==='test') {
+  if (process.env.NODE_ENV === 'test') {
     console.log('Running Tests...');
-    setTimeout(function () {
+    setTimeout(() => {
       try {
         runner.run();
-      } catch (error) {
+      } catch (e) {
         console.log('Tests are not valid:');
-        console.error(error);
+        console.error(e);
       }
     }, 1500);
   }
 });
 
-// Set up Socket.io
+// 🎮 WebSocket Setup
 const io = socket(server);
 
 // Game state
 let players = [];
 let collectibles = [];
 
-// Generate a new collectible
+// Helper: Generate new collectible
 function generateCollectible() {
   return new Collectible({
-    x: Math.floor(Math.random() * 590) + 25, // Keep within canvas
-    y: Math.floor(Math.random() * 430) + 25, // Keep within canvas
+    x: Math.floor(Math.random() * 590) + 25,
+    y: Math.floor(Math.random() * 430) + 25,
     value: 1,
     id: Date.now()
   });
 }
 
-// Initialize collectibles
+// Start with 3 collectibles
 for (let i = 0; i < 3; i++) {
   collectibles.push(generateCollectible());
 }
 
-// Socket.io connection handler
+// Handle Socket.io connections
 io.on('connection', (socket) => {
   console.log('New connection:', socket.id);
-  
-  // Handle new player joining
+
   socket.on('new-player', (playerData) => {
-    playerData.id = socket.id; // Use socket.id for player id
+    playerData.id = socket.id;
     players.push(playerData);
-    
-    // Send current players and collectibles to the new player
+
     socket.emit('update-players', players);
     socket.emit('update-collectibles', collectibles);
-    
-    // Broadcast new player to all other players
     socket.broadcast.emit('update-players', players);
   });
-  
-  // Handle player movement
+
   socket.on('update-player', (playerData) => {
-    // Update the player's data
     const playerIndex = players.findIndex(p => p.id === socket.id);
     if (playerIndex !== -1) {
       players[playerIndex] = {
@@ -116,46 +110,32 @@ io.on('connection', (socket) => {
         y: playerData.y,
         score: playerData.score
       };
-      
-      // Broadcast updated players to all clients
       io.emit('update-players', players);
     }
   });
-  
-  // Handle collectible collection
-  socket.on('collectible-collected', ({playerId, collectibleId}) => {
-    // Find the player
+
+  socket.on('collectible-collected', ({ playerId, collectibleId }) => {
     const playerIndex = players.findIndex(p => p.id === playerId);
-    if (playerIndex !== -1) {
-      // Find the collectible
-      const collectibleIndex = collectibles.findIndex(c => c.id === collectibleId);
-      if (collectibleIndex !== -1) {
-        // Increase player's score
-        players[playerIndex].score += collectibles[collectibleIndex].value;
-        
-        // Remove the collected collectible
-        collectibles.splice(collectibleIndex, 1);
-        
-        // Generate a new collectible
-        collectibles.push(generateCollectible());
-        
-        // Broadcast updated game state to all clients
-        io.emit('update-players', players);
-        io.emit('update-collectibles', collectibles);
-      }
+    const collectibleIndex = collectibles.findIndex(c => c.id === collectibleId);
+
+    if (playerIndex !== -1 && collectibleIndex !== -1) {
+      players[playerIndex].score += collectibles[collectibleIndex].value;
+      collectibles.splice(collectibleIndex, 1);
+      collectibles.push(generateCollectible());
+
+      io.emit('update-players', players);
+      io.emit('update-collectibles', collectibles);
     }
   });
-  
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
-    
-    const playerIndex = players.findIndex(p => p.id === socket.id);
-    if (playerIndex !== -1) {
-      players.splice(playerIndex, 1);
-      
+    const index = players.findIndex(p => p.id === socket.id);
+    if (index !== -1) {
+      players.splice(index, 1);
       io.emit('update-players', players);
     }
   });
 });
 
-module.exports = app; // For testing
+module.exports = app;
